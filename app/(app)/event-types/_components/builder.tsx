@@ -1,0 +1,734 @@
+"use client";
+
+import { zodResolver } from "@hookform/resolvers/zod";
+import {
+  ArrowLeft,
+  ArrowRight,
+  ArrowSquareOut,
+  CheckCircle,
+  FloppyDisk,
+  List,
+  X,
+} from "@phosphor-icons/react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useEffect, useRef, useState, useTransition } from "react";
+import { type FieldErrors, useForm } from "react-hook-form";
+import { toast } from "sonner";
+import { z } from "zod";
+import type { MeetingLimitRow } from "@/app/actions/availability";
+import {
+  createEventType,
+  type EventTypeFormData,
+  updateEventType,
+} from "@/app/actions/event-types";
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Form } from "@/components/ui/form";
+import type { MeetingIntegrations } from "@/lib/integrations/status";
+import { cn } from "@/lib/utils";
+import { LivePreview } from "./live-preview";
+import { TabAvailability } from "./tab-availability";
+import { TabCancellation } from "./tab-cancellation";
+import { MEETING_TYPES, TabGeneral } from "./tab-general";
+import { TabLocation } from "./tab-location";
+import { TabNotifications } from "./tab-notifications";
+import { TabQuestions } from "./tab-questions";
+
+const schema = z
+  .object({
+    name: z.string().min(1, "Name is required").max(100),
+    slug: z
+      .string()
+      .min(1)
+      .max(100)
+      .regex(/^[a-z0-9-]+$/, "Only lowercase letters, numbers, and hyphens"),
+    description: z.string().max(500).optional(),
+    color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+    isActive: z.boolean(),
+    isHidden: z.boolean(),
+    durations: z
+      .array(z.number().min(5).max(480))
+      .min(1, "At least one duration required"),
+    defaultDuration: z.number(),
+    availabilityScheduleId: z.string().optional(),
+    bookingWindow: z.number().min(1).max(365),
+    bookingWindowType: z.enum(["rolling", "fixed"]),
+    bookingRangeStart: z.string().optional(),
+    bookingRangeEnd: z.string().optional(),
+    minimumNotice: z.number().min(0).max(1440),
+    bufferBefore: z.number().min(0).max(120),
+    bufferAfter: z.number().min(0).max(120),
+    maxBookingsPerDay: z.number().min(1).max(100).nullable().optional(),
+    startTimeIncrement: z.number().min(5).max(60),
+    locationType: z.enum([
+      "zoom",
+      "google_meet",
+      "phone_host_calls",
+      "phone_invitee_calls",
+      "in_person",
+      "custom",
+      "invitees_choice",
+    ]),
+    locationValue: z.string().max(500).optional(),
+    hostPhoneNumber: z
+      .string()
+      .max(25)
+      .refine(
+        (v) => !v || v.trim() === "" || /^\+[1-9][\d\s\-().]*$/.test(v.trim()),
+        {
+          message:
+            "Enter a valid number with country code (e.g. +91 98765 43210)",
+        }
+      )
+      .refine(
+        (v) => {
+          if (!v || v.trim() === "") {
+            return true;
+          }
+          // Bounds the local number to a plausible length (4–15 digits, per E.164).
+          const digits = v.trim().replace(/\D/g, "");
+          return digits.length >= 5 && digits.length <= 18;
+        },
+        {
+          message:
+            "Phone number must be between 4 and 15 digits (plus country code)",
+        }
+      )
+      .optional(),
+    confirmationNote: z.string().max(1000).optional(),
+    meetingType: z.enum(["one_on_one", "group", "round_robin", "collective"]),
+    requiresApproval: z.boolean(),
+    allowCancellation: z.boolean(),
+    cancellationCutoffHours: z.number().min(0).max(72),
+    allowRescheduling: z.boolean(),
+    rescheduleCutoffHours: z.number().min(0).max(72),
+    requireCancellationReason: z.boolean(),
+    showPolicyText: z.boolean(),
+    policyText: z.string().max(1000).optional(),
+  })
+  .refine((v) => v.durations.includes(v.defaultDuration), {
+    message: "The default duration must be one of the offered durations",
+    path: ["defaultDuration"],
+  })
+  .refine((v) => v.locationType !== "in_person" || !!v.locationValue?.trim(), {
+    message: "Enter a location address for in-person meetings",
+    path: ["locationValue"],
+  })
+  .refine((v) => v.locationType !== "custom" || !!v.locationValue?.trim(), {
+    message: "Enter a custom location or link",
+    path: ["locationValue"],
+  })
+  .refine(
+    (v) =>
+      v.locationType !== "phone_invitee_calls" || !!v.hostPhoneNumber?.trim(),
+    {
+      message: "Enter your phone number for invitees to call",
+      path: ["hostPhoneNumber"],
+    }
+  )
+  .refine(
+    (v) =>
+      v.bookingWindowType !== "fixed" ||
+      (!!v.bookingRangeStart && !!v.bookingRangeEnd),
+    {
+      message: "Set both a start and end date for a fixed booking window",
+      path: ["bookingRangeEnd"],
+    }
+  )
+  .refine(
+    (v) =>
+      v.bookingWindowType !== "fixed" ||
+      !v.bookingRangeStart ||
+      !v.bookingRangeEnd ||
+      v.bookingRangeEnd >= v.bookingRangeStart,
+    {
+      message: "End date must be on or after the start date",
+      path: ["bookingRangeEnd"],
+    }
+  );
+
+export type BuilderFormValues = z.infer<typeof schema>;
+
+export interface ScheduleOption {
+  id: string;
+  isDefault: boolean;
+  name: string;
+  summary: { days: string; time: string } | null;
+}
+
+export interface ExistingQuestion {
+  id: string;
+  isActive: boolean;
+  isRequired: boolean;
+  label: string;
+  options: string[] | null;
+  placeholder: string | null;
+  position: number;
+  type:
+    | "short_text"
+    | "long_text"
+    | "phone"
+    | "single_select"
+    | "multiple_select"
+    | "dropdown";
+}
+
+interface BuilderProps {
+  defaultValues: BuilderFormValues;
+  eventTypeId?: string;
+  globalLimits?: MeetingLimitRow[];
+  integrations?: MeetingIntegrations;
+  mode: "create" | "edit";
+  questions?: ExistingQuestion[];
+  schedules: ScheduleOption[];
+  username: string | null;
+}
+
+const TABS = [
+  { id: "general", label: "Details" },
+  { id: "availability", label: "Scheduling" },
+  { id: "location", label: "Location" },
+  { id: "questions", label: "Booking Form" },
+  { id: "notifications", label: "Confirmations" },
+  { id: "cancellation", label: "Cancellation" },
+];
+
+// sessionStorage (not localStorage) — a scratch draft for an interrupted
+// editing session (e.g. clicking "Edit Schedule" and returning via Back),
+// not something that should resurrect on unrelated future visits.
+function draftKeyFor(mode: "create" | "edit", eventTypeId?: string) {
+  return mode === "create"
+    ? "schduled:event-type-draft:new"
+    : `schduled:event-type-draft:edit:${eventTypeId}`;
+}
+
+// Maps each tab to the form fields it owns — used to jump to the tab with errors
+const TAB_FIELDS: Record<string, (keyof BuilderFormValues)[]> = {
+  general: [
+    "name",
+    "slug",
+    "description",
+    "color",
+    "meetingType",
+    "isActive",
+    "isHidden",
+    "requiresApproval",
+  ],
+  availability: [
+    "durations",
+    "defaultDuration",
+    "availabilityScheduleId",
+    "bookingWindow",
+    "bookingWindowType",
+    "bookingRangeStart",
+    "bookingRangeEnd",
+    "minimumNotice",
+    "bufferBefore",
+    "bufferAfter",
+    "startTimeIncrement",
+    "maxBookingsPerDay",
+  ],
+  location: ["locationType", "locationValue", "hostPhoneNumber"],
+  notifications: ["confirmationNote"],
+  cancellation: [
+    "allowCancellation",
+    "cancellationCutoffHours",
+    "allowRescheduling",
+    "rescheduleCutoffHours",
+    "requireCancellationReason",
+    "showPolicyText",
+    "policyText",
+  ],
+};
+
+export function EventTypeBuilder({
+  mode,
+  eventTypeId,
+  defaultValues,
+  schedules,
+  globalLimits = [],
+  integrations = { googleConnected: false, zoomConnected: false },
+  questions = [],
+  username,
+}: BuilderProps) {
+  const router = useRouter();
+  const [isPending, startTransition] = useTransition();
+  const [activeTab, setActiveTab] = useState("general");
+  const [pendingQuestions, setPendingQuestions] = useState<ExistingQuestion[]>(
+    []
+  );
+  const [successInfo, setSuccessInfo] = useState<{
+    id: string;
+    slug: string;
+    name: string;
+    isCreate: boolean;
+  } | null>(null);
+
+  const form = useForm<BuilderFormValues>({
+    resolver: zodResolver(schema),
+    defaultValues,
+  });
+
+  // Last-saved values, so "Discard" reverts to the most recent save in edit
+  // mode rather than the page's original server-rendered values.
+  const savedValuesRef = useRef(defaultValues);
+
+  const draftKey = draftKeyFor(mode, eventTypeId);
+  // Gates the persist-effect below until the restore-effect (mount) has run,
+  // since both fire in the same commit — otherwise persist's first run would
+  // capture pre-restore (blank) values and overwrite the just-read draft.
+  const [hydrated, setHydrated] = useState(false);
+
+  function clearDraft() {
+    try {
+      sessionStorage.removeItem(draftKey);
+    } catch {
+      // Private-browsing/storage-disabled edge cases — nothing to clean up.
+    }
+  }
+
+  // Restore an interrupted draft on mount (e.g. user left via "Edit
+  // Schedule" and returned via Back). keepDefaultValues so isDirty still
+  // compares against the ORIGINAL server values, not the restored draft —
+  // otherwise Save/Discard wouldn't realize there's anything to save.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only restore, re-running on draftKey/form.reset would re-trigger the draft restore
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem(draftKey);
+      const parsed = raw ? JSON.parse(raw) : null;
+      // Deliberately not validated against the schema — a draft is often
+      // mid-edit and legitimately incomplete; normal per-tab/submit
+      // validation handles that once the user acts on it.
+      if (
+        parsed?.values &&
+        typeof parsed.values === "object" &&
+        !Array.isArray(parsed.values)
+      ) {
+        form.reset(parsed.values, { keepDefaultValues: true });
+        if (typeof parsed.activeTab === "string") {
+          setActiveTab(parsed.activeTab);
+        }
+        if (Array.isArray(parsed.pendingQuestions)) {
+          setPendingQuestions(parsed.pendingQuestions);
+        }
+      }
+    } catch {
+      // Corrupted/incompatible draft — ignore it and start fresh.
+    } finally {
+      setHydrated(true);
+    }
+    // Intentionally mount-only: restoring is a one-time action, not something
+    // that should re-run as the form/draftKey identity happens to change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Persist the in-progress draft, but only on genuine field edits — a
+  // subscription (rather than `form.watch()` + effect-on-value) so unrelated
+  // re-renders (e.g. the post-submit success dialog) can't refire this and
+  // resurrect a draft that `clearDraft()` just removed.
+  useEffect(() => {
+    if (!hydrated) {
+      return;
+    }
+    const subscription = form.watch((values) => {
+      try {
+        sessionStorage.setItem(
+          draftKey,
+          JSON.stringify({ values, activeTab, pendingQuestions })
+        );
+      } catch {
+        // Same as above — losing the draft-persistence nicety isn't worth
+        // crashing the form over.
+      }
+    });
+    return () => subscription.unsubscribe();
+  }, [hydrated, form, activeTab, pendingQuestions, draftKey]);
+
+  const isDirty = form.formState.isDirty;
+  const tabIndex = TABS.findIndex((t) => t.id === activeTab);
+
+  useEffect(() => {
+    if (!isDirty) {
+      return;
+    }
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [isDirty]);
+  const isFirst = tabIndex === 0;
+  const isLast = tabIndex === TABS.length - 1;
+
+  // When validation fails, jump to the first tab that owns an errored field
+  function onInvalid(errors: FieldErrors<BuilderFormValues>) {
+    for (const tab of TABS) {
+      if ((TAB_FIELDS[tab.id] ?? []).some((f) => f in errors)) {
+        setActiveTab(tab.id);
+        return;
+      }
+    }
+  }
+
+  function onSubmit(values: BuilderFormValues) {
+    startTransition(async () => {
+      const data: EventTypeFormData = {
+        ...values,
+        description: values.description || undefined,
+        locationValue: values.locationValue || undefined,
+        hostPhoneNumber: values.hostPhoneNumber || undefined,
+        confirmationNote: values.confirmationNote || undefined,
+        policyText: values.policyText || undefined,
+        availabilityScheduleId: values.availabilityScheduleId || undefined,
+        maxBookingsPerDay: values.maxBookingsPerDay ?? null,
+      };
+
+      if (mode === "create") {
+        const res = await createEventType(
+          data,
+          pendingQuestions.map((q) => ({
+            label: q.label,
+            type: q.type,
+            isRequired: q.isRequired,
+            options: q.options ?? undefined,
+            placeholder: q.placeholder ?? undefined,
+          }))
+        );
+        if ("error" in res) {
+          toast.error(res.error);
+          return;
+        }
+        clearDraft();
+        setSuccessInfo({
+          id: res.id,
+          slug: res.slug,
+          name: values.name,
+          isCreate: true,
+        });
+      } else {
+        const res = await updateEventType(eventTypeId!, data);
+        if ("error" in res) {
+          toast.error(res.error);
+          return;
+        }
+        // The server may have auto-suffixed the slug on collision — sync the
+        // form + preview link to the slug that was actually saved.
+        const savedValues = { ...values, slug: res.slug };
+        form.reset(savedValues);
+        savedValuesRef.current = savedValues;
+        clearDraft();
+        setSuccessInfo({
+          id: eventTypeId!,
+          slug: res.slug,
+          name: values.name,
+          isCreate: false,
+        });
+      }
+    });
+  }
+
+  return (
+    <Form {...form}>
+      <form onSubmit={form.handleSubmit(onSubmit, onInvalid)}>
+        <div className="sticky top-0 z-20 bg-page">
+          <div className="border border-base-300 bg-base-100">
+            <Breadcrumb className="border-b border-base-300/60 px-4 py-1.5 text-xs">
+              <BreadcrumbList className="gap-1.5 font-sans text-xs font-normal normal-case tracking-normal sm:gap-1.5">
+                <BreadcrumbItem>
+                  <BreadcrumbLink asChild>
+                    <Link
+                      className="flex items-center gap-1"
+                      href="/event-types"
+                    >
+                      <ArrowLeft size={13} />
+                      Meeting Types
+                    </Link>
+                  </BreadcrumbLink>
+                </BreadcrumbItem>
+                <BreadcrumbSeparator />
+                <BreadcrumbItem>
+                  <BreadcrumbPage className="truncate">
+                    {mode === "create"
+                      ? "New Meeting Type"
+                      : form.watch("name") || "Edit"}
+                  </BreadcrumbPage>
+                </BreadcrumbItem>
+              </BreadcrumbList>
+            </Breadcrumb>
+
+            <div className="flex flex-wrap items-center gap-3 px-4 py-3">
+              <span
+                aria-hidden
+                className="h-9 w-9 shrink-0 flex items-center justify-center text-white font-bold text-base ring-2 ring-inset ring-black/10"
+                style={{ backgroundColor: form.watch("color") || "#0d9488" }}
+              >
+                {(form.watch("name") ||
+                  (mode === "create" ? "N" : "E"))[0].toUpperCase()}
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h1 className="truncate text-lg font-bold text-base-content">
+                    {form.watch("name") ||
+                      (mode === "create" ? "New Meeting Type" : "Untitled")}
+                  </h1>
+                </div>
+                <span className="mt-1 inline-block text-xs font-medium text-muted-foreground">
+                  {MEETING_TYPES.find((m) => m.id === form.watch("meetingType"))
+                    ?.label ?? "One-on-One"}
+                </span>
+              </div>
+
+              <div className="flex shrink-0 items-center gap-2">
+                {mode === "edit" && (
+                  <Button
+                    className="gap-1.5 text-muted-foreground"
+                    disabled={!isDirty || isPending}
+                    onClick={() => {
+                      form.reset(savedValuesRef.current);
+                      clearDraft();
+                    }}
+                    size="sm"
+                    type="button"
+                    variant="ghost"
+                  >
+                    <X size={13} />
+                    Discard
+                  </Button>
+                )}
+                <Button
+                  className="gap-1.5"
+                  disabled={(mode === "edit" && !isDirty) || isPending}
+                  size="sm"
+                  type="submit"
+                >
+                  <FloppyDisk size={13} />
+                  {isPending
+                    ? mode === "create"
+                      ? "Creating…"
+                      : "Saving…"
+                    : mode === "create"
+                      ? "Create Meeting Type"
+                      : "Save Changes"}
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          {/* Custom tab bar (avoids native scroll arrows); no edge-to-edge
+              bleed so its border lines up with the header card above. */}
+          <div className="border-b border-base-300 bg-page">
+            <div className="flex overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              {TABS.map((tab) => (
+                <button
+                  className={cn(
+                    "shrink-0 flex-1 min-w-[80px] border-b-2 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap transition-colors",
+                    activeTab === tab.id
+                      ? "border-primary text-base-content"
+                      : "border-transparent text-muted-foreground hover:text-base-content hover:border-base-300"
+                  )}
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id)}
+                  type="button"
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-6 flex gap-10 items-start">
+          <div className="flex-1 min-w-0 max-w-3xl">
+            {activeTab === "general" && (
+              <TabGeneral
+                form={form}
+                meetingType={form.watch("meetingType")}
+                onMeetingTypeChange={(t) =>
+                  form.setValue(
+                    "meetingType",
+                    t as BuilderFormValues["meetingType"],
+                    { shouldDirty: true }
+                  )
+                }
+              />
+            )}
+            {activeTab === "availability" && (
+              <TabAvailability
+                form={form}
+                globalLimits={globalLimits}
+                schedules={schedules}
+              />
+            )}
+            {activeTab === "location" && (
+              <TabLocation form={form} integrations={integrations} />
+            )}
+            {activeTab === "questions" && (
+              <TabQuestions
+                eventTypeId={eventTypeId}
+                locationType={form.watch("locationType")}
+                mode={mode}
+                onPendingChange={setPendingQuestions}
+                pendingQuestions={pendingQuestions}
+                questions={questions}
+              />
+            )}
+            {activeTab === "notifications" && <TabNotifications form={form} />}
+            {activeTab === "cancellation" && <TabCancellation form={form} />}
+
+            {/* Sticky three-column nav; no edge-to-edge bleed so its border
+                lines up with the form fields above. */}
+            <div className="mt-8 sticky bottom-0 py-3 border-t border-base-300 bg-page flex items-center justify-between">
+              <Button
+                className="gap-1.5"
+                disabled={isFirst}
+                onClick={(e) => {
+                  e.preventDefault();
+                  setActiveTab(TABS[tabIndex - 1].id);
+                }}
+                size="sm"
+                type="button"
+                variant="outline"
+              >
+                <ArrowLeft size={13} />
+                {isFirst ? "Previous" : TABS[tabIndex - 1].label}
+              </Button>
+
+              <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground hidden sm:block">
+                {TABS[tabIndex].label}
+              </span>
+
+              {isLast ? (
+                <Button
+                  className="gap-1.5"
+                  disabled={(mode === "edit" && !isDirty) || isPending}
+                  size="sm"
+                  type="submit"
+                >
+                  <FloppyDisk size={13} />
+                  {isPending
+                    ? mode === "create"
+                      ? "Creating…"
+                      : "Saving…"
+                    : mode === "create"
+                      ? "Create Meeting Type"
+                      : "Save Changes"}
+                </Button>
+              ) : (
+                <Button
+                  className="gap-1.5"
+                  onClick={async (e) => {
+                    e.preventDefault();
+                    const valid = await form.trigger(TAB_FIELDS[activeTab]);
+                    if (valid) {
+                      setActiveTab(TABS[tabIndex + 1].id);
+                    }
+                  }}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  {TABS[tabIndex + 1].label}
+                  <ArrowRight size={13} />
+                </Button>
+              )}
+            </div>
+          </div>
+
+          <div className="w-80 shrink-0 hidden lg:block lg:sticky lg:top-44">
+            <LivePreview
+              form={form}
+              meetingType={form.watch("meetingType")}
+              username={username}
+            />
+          </div>
+        </div>
+      </form>
+
+      {/* Post-save success dialog */}
+      <Dialog
+        onOpenChange={(open) => {
+          if (!open) {
+            if (successInfo?.isCreate) {
+              router.push(`/event-types/${successInfo.id}`);
+            } else {
+              setSuccessInfo(null);
+            }
+          }
+        }}
+        open={!!successInfo}
+      >
+        <DialogContent className="sm:max-w-sm">
+          <DialogTitle className="sr-only">Meeting type saved</DialogTitle>
+          <DialogDescription className="sr-only">
+            Your meeting type has been saved successfully.
+          </DialogDescription>
+
+          <div className="flex flex-col items-center gap-4 py-2">
+            <div className="flex h-12 w-12 items-center justify-center bg-primary/10 text-primary">
+              <CheckCircle size={28} weight="fill" />
+            </div>
+            <div className="text-center">
+              <p className="font-semibold text-base">
+                {successInfo?.isCreate
+                  ? "Meeting type created!"
+                  : "Changes saved!"}
+              </p>
+              <p className="mt-1 text-sm text-muted-foreground truncate max-w-[260px]">
+                {successInfo?.name}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-2 pt-1">
+            {username && (
+              <a
+                className="inline-flex items-center justify-center gap-2 h-9 px-4 text-sm font-medium bg-primary text-primary-content hover:bg-primary/90 transition-colors"
+                href={`/${username}/${successInfo?.slug}`}
+                rel="noopener noreferrer"
+                target="_blank"
+              >
+                <ArrowSquareOut size={14} />
+                Preview booking page
+              </a>
+            )}
+
+            <Link
+              className="inline-flex items-center justify-center gap-2 h-9 px-4 text-sm font-medium border border-base-300 hover:bg-base-200 transition-colors"
+              href="/event-types"
+            >
+              <List size={14} />
+              Go to event list
+            </Link>
+
+            {successInfo?.isCreate && (
+              <button
+                className="inline-flex items-center justify-center h-9 px-4 text-sm text-muted-foreground hover:text-base-content transition-colors"
+                onClick={() => {
+                  router.push(`/event-types/${successInfo.id}`);
+                }}
+                type="button"
+              >
+                Continue editing
+              </button>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+    </Form>
+  );
+}

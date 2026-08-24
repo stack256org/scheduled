@@ -1,0 +1,90 @@
+# Use this file instead of docker-compose.yml if you already have a Postgres
+# database (managed service like Supabase/Neon/RDS, or a Postgres instance
+# you run yourself) and don't want Compose to also run one for you.
+#
+#   docker compose -f docker-compose.external-db.yml up -d
+#
+# Set DATABASE_URL in .env to point at your existing database — POSTGRES_USER/
+# POSTGRES_PASSWORD/POSTGRES_DB are not used by this file (those only exist to
+# configure the bundled postgres service in docker-compose.yml).
+#
+# There's no local Postgres container to wait on here, so `migrate` runs
+# against DATABASE_URL directly on boot. If your database isn't reachable yet
+# when the container starts, `restart: on-failure` below keeps retrying until
+# it succeeds — web/worker won't start until migrate exits 0.
+#
+# Like docker-compose.yml, this pulls published images rather than building
+# from source — see that file's header for the IMAGE_TAG note (this repo
+# hasn't cut its first tagged release yet, so use IMAGE_TAG=main until it has).
+
+x-web-image: &web_image ${SCHDULED_WEB_IMAGE:-ghcr.io/stack256org/schduled}:${IMAGE_TAG:-latest}
+x-worker-image: &worker_image ${SCHDULED_WORKER_IMAGE:-ghcr.io/stack256org/schduled-worker}:${IMAGE_TAG:-latest}
+
+services:
+  # Runs as root for a fraction of a second, purely to hand the uploads
+  # volume to the non-root `app` user (uid 1001) the web image runs as. See
+  # docker-compose.yml for the full explanation — same reasoning applies
+  # here.
+  init-uploads:
+    image: alpine:3
+    user: "0:0"
+    command: >
+      sh -c "chown -R 1001:1001 /app/uploads &&
+             echo 'uploads volume ownership set to uid/gid 1001'"
+    volumes:
+      - uploads:/app/uploads
+    restart: "no"
+
+  migrate:
+    image: *worker_image
+    pull_policy: always
+    # Not `pnpm db:migrate` (drizzle-kit's CLI) — it was observed to exit 1
+    # on failure without printing the underlying error. `db:migrate:docker`
+    # (scripts/migrate.ts) uses the same postgres/drizzle-orm migrator
+    # lib/db.ts already depends on, with a plain try/catch that always logs
+    # what it caught.
+    command: ["pnpm", "db:migrate:docker"]
+    env_file: .env
+    depends_on:
+      init-uploads:
+        condition: service_completed_successfully
+    restart: on-failure
+
+  web:
+    image: *web_image
+    pull_policy: always
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PORT: 3000
+    ports:
+      - "${HOST_PORT:-3000}:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      # Only used when STORAGE_DRIVER=local (the default). Not needed if
+      # you've set STORAGE_DRIVER=s3/r2 — see ENVIRONMENT.md §7.
+      - uploads:/app/uploads
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  worker:
+    image: *worker_image
+    pull_policy: always
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  # Pinned name — see docker-compose.yml for why (Dokploy-observed volume
+  # drift). Same literal name so switching between bundled/external Postgres
+  # keeps the same uploads.
+  uploads:
+    name: schduled_uploads

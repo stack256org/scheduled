@@ -1,0 +1,2 @@
+ALTER TYPE "public"."audit_action" ADD VALUE IF NOT EXISTS 'availability.schedule_created' BEFORE 'availability.schedule_updated';--> statement-breakpoint
+ALTER TYPE "public"."audit_action" ADD VALUE IF NOT EXISTS 'availability.schedule_deleted' BEFORE 'availability.schedule_updated';

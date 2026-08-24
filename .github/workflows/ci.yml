@@ -1,0 +1,138 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Typecheck, lint, test & build
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: schduled
+          POSTGRES_PASSWORD: ci-test
+          POSTGRES_DB: schduled
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://schduled:ci-test@localhost:5432/schduled
+      APP_SECRET: ci-test-secret-not-for-production-use-32-chars-min
+      # `next build` (the Build step below) forces NODE_ENV=production
+      # internally regardless of what's set here, and lib/env.ts requires
+      # APP_URL whenever NODE_ENV is "production" — see Dockerfile for the
+      # same requirement in the Docker build stage.
+      APP_URL: http://localhost:3000
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      # Before `pnpm install`, deliberately: the script is dependency-free plain
+      # Node, and a stale README is a two-second failure that should not wait
+      # behind an install and a full Next build. Catches the drift that shipped
+      # a `ghcr.io/sahajtavethiya96/...` owner in README/SELF-HOSTING/CHANGELOG
+      # /docker-compose that matched neither git remote.
+      - name: README is in step with the version
+        run: pnpm docs:check
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Run migrations
+        run: pnpm db:migrate
+
+      - name: Run tests
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      # Informational only — the codebase has pre-existing formatting debt
+      # unrelated to any single change (see SELF-HOSTING.md). Reported, not
+      # blocking, until that debt is cleaned up separately.
+      - name: Lint (report only)
+        run: pnpm lint
+        continue-on-error: true
+
+      # Informational only — known transitive-dependency advisories exist
+      # today (e.g. esbuild via drizzle-kit/tsx/react-email) with no fix
+      # published upstream yet. Reported so they're visible, not blocking.
+      - name: Dependency audit (report only)
+        run: pnpm audit --prod
+        continue-on-error: true
+
+  migrations:
+    name: Migrations apply cleanly
+    runs-on: ubuntu-latest
+
+    # Catches the failure mode that breaks self-hosters most often: a schema
+    # change committed without its generated migration, so `docker compose up`
+    # dies in the one-shot migrate service on a fresh install.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: schduled
+          POSTGRES_PASSWORD: ci-test
+          POSTGRES_DB: schduled_migrations_ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://schduled:ci-test@localhost:5432/schduled_migrations_ci
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run migrations against a fresh database
+        run: pnpm db:migrate
+
+      - name: Fail if the schema has uncommitted migrations
+        run: |
+          pnpm db:generate
+          if ! git diff --quiet --exit-code db/migrations; then
+            echo "::error::db/schema changed without a generated migration."
+            echo "Run 'pnpm db:generate' and commit the result in db/migrations/."
+            git diff --stat db/migrations
+            exit 1
+          fi

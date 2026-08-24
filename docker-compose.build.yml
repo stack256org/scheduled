@@ -1,0 +1,126 @@
+# Schduled, built from your local source, with PostgreSQL included.
+#
+#   git clone <your-repo-url> schduled && cd schduled
+#   cp .env.docker.example .env   # set APP_SECRET and NEXT_PUBLIC_APP_URL
+#   docker compose -f docker-compose.build.yml up -d
+#
+# Most people do NOT want this file. It compiles the whole app on your
+# machine, which on a small server is slow and memory-hungry. Use plain
+# docker-compose.yml instead — it pulls a published, prebuilt image.
+#
+# The main reason to use this file is that you changed the code (or the
+# repo's published images aren't public yet — see .github/workflows/release.yml).
+#
+# Already have a Postgres database (managed service or your own instance)?
+# See docker-compose.external-db.yml instead — same "build from source" idea
+# is not offered there; point it at your database and it pulls the published
+# image. If you need both "build from source" and "external database" at
+# once, copy this file and drop the postgres/init-uploads services from it.
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-schduled}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_DB: ${POSTGRES_DB:-schduled}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-schduled}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Runs as root for a fraction of a second, purely to hand the uploads
+  # volume to the non-root `app` user (uid 1001) both Dockerfiles run as.
+  # Docker gives a *pre-existing* named volume root ownership, so a
+  # deployment created before the images went non-root would otherwise start
+  # failing uploads with EACCES. A fresh volume already has the right
+  # ownership from the image, making this a no-op — either way it runs
+  # unconditionally so no operator has to remember a manual migration step.
+  init-uploads:
+    image: alpine:3
+    user: "0:0"
+    command: >
+      sh -c "chown -R 1001:1001 /app/uploads &&
+             echo 'uploads volume ownership set to uid/gid 1001'"
+    volumes:
+      - uploads:/app/uploads
+    restart: "no"
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    # Not `pnpm db:migrate` (drizzle-kit's CLI) — it was observed to exit 1
+    # on failure without printing the underlying error. `db:migrate:docker`
+    # (scripts/migrate.ts) uses the same postgres/drizzle-orm migrator
+    # lib/db.ts already depends on, with a plain try/catch that always logs
+    # what it caught.
+    command: ["pnpm", "db:migrate:docker"]
+    env_file: .env
+    depends_on:
+      init-uploads:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    # HOST_PORT, not PORT: `env_file: .env` passes every var into the
+    # container, and the app itself listens on PORT internally — so naming
+    # this PORT would make one variable silently change the container's
+    # internal bind port too, breaking both this mapping and the
+    # HEALTHCHECK below (which probes :3000).
+    environment:
+      PORT: 3000
+    ports:
+      - "${HOST_PORT:-3000}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      # Only used when STORAGE_DRIVER=local (the default). Not needed if
+      # you've set STORAGE_DRIVER=s3/r2 — see ENVIRONMENT.md §7.
+      - uploads:/app/uploads
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  # Pinned to literal names (not just "postgres-data"/"uploads") on purpose:
+  # Compose namespaces unnamed volumes as "<compose-project-name>_<volume-name>",
+  # and some deploy tools (observed with Dokploy) don't keep the project name
+  # stable across redeploys — that silently creates a NEW, empty volume each
+  # time, orphaning the old one (DB data or uploads) without any error.
+  # Pinning guarantees every deploy reattaches to the same volume, and it's
+  # the same name used by plain docker-compose.yml, so you can switch between
+  # the two without losing data.
+  postgres-data:
+    name: schduled_postgres_data
+  uploads:
+    name: schduled_uploads
