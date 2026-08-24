@@ -2,12 +2,16 @@
 
 All notable changes to this project are documented here.
 
-The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-This project doesn't yet follow semantic versioning with tagged releases —
-that starts once the OSS release process (`SELF-HOSTING.md` Phase 3) is
-complete. Until then, everything lives under **[Unreleased]**.
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project follows [Semantic Versioning](https://semver.org/). Every
+`## [<version>]` section below corresponds to a tagged GitHub Release; see
+`.github/workflows/release.yml`.
 
 ## [Unreleased]
+
+## [0.1.0] - 2026-08-24
+
+Initial self-hosted release.
 
 ### Added
 - Self-hosted deployment support: `Dockerfile`, `docker-compose.yml`,

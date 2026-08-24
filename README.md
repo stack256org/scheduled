@@ -48,13 +48,19 @@ See **[SELF-HOSTING.md](./SELF-HOSTING.md)** for the full guide, and
 curl -O https://raw.githubusercontent.com/stack256org/scheduled/main/docker-compose.yml
 curl -o .env https://raw.githubusercontent.com/stack256org/scheduled/main/.env.docker.example
 # set APP_SECRET, APP_URL, and (recommended) INITIAL_ADMIN_EMAIL
-docker compose up -d
+IMAGE_TAG=0.1.0 docker compose up -d
 ```
 
-This pulls a prebuilt, published image (multi-arch: Intel + ARM) rather than
-building on your server. **This repo hasn't cut its first tagged release
-yet**, so until it has, run with `IMAGE_TAG=main docker compose up -d`
-instead — see the comment at the top of `docker-compose.yml`.
+This pulls prebuilt, published images (multi-arch: Intel + ARM) rather than
+building on your server. Pin a version in production, because `latest`
+moves with every release — available tags are `latest`, the `0` /
+`0.1` / `0.1.0` ladder, `main` (rebuilt on every change, expect
+rough edges), and a fixed `sha-<short>` per build:
+
+```bash
+docker pull ghcr.io/stack256org/schduled:0.1.0
+docker pull ghcr.io/stack256org/schduled-worker:0.1.0
+```
 <!-- END GENERATED: quick-start -->
 
 <sub>The block above is generated from `package.json`'s `version` (and
