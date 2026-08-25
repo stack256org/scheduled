@@ -170,7 +170,7 @@ jobs:
       # arm64 is emulated on GitHub's amd64 runners, which is why this takes
       # 10-20 minutes per image rather than 3.
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
