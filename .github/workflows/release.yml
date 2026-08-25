@@ -76,7 +76,7 @@ jobs:
       minor: ${{ steps.v.outputs.minor }}
       is_release: ${{ steps.v.outputs.is_release }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
@@ -147,7 +147,7 @@ jobs:
             title: Schduled Worker
             description: Self-hosted scheduling platform — background job worker (pg-boss).
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
@@ -290,7 +290,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
