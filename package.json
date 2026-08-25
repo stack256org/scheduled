@@ -47,7 +47,7 @@
     "countries-and-timezones": "^3.9.0",
     "date-fns": "^4.4.0",
     "date-fns-tz": "^3.2.0",
-    "date-holidays": "^3.32.0",
+    "date-holidays": "^3.35.0",
     "drizzle-kit": "^0.31.10",
     "drizzle-orm": "^0.45.2",
     "files-sdk": "^2.1.0",
