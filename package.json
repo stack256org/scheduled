@@ -50,7 +50,7 @@
     "date-holidays": "^3.32.0",
     "drizzle-kit": "^0.31.10",
     "drizzle-orm": "^0.45.2",
-    "files-sdk": "^2.1.0",
+    "files-sdk": "^2.2.5",
     "geist": "^1.7.2",
     "googleapis": "^173.0.0",
     "ical-generator": "^11.0.0",
