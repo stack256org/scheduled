@@ -1,0 +1,1 @@
+ALTER TABLE "notification_preference" ADD COLUMN "join_soon_lead_minutes" integer DEFAULT 15 NOT NULL;

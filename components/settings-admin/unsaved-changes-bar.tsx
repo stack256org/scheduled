@@ -1,0 +1,62 @@
+"use client";
+
+import { CircleNotch, Warning } from "@phosphor-icons/react";
+import { Button } from "@/components/ui/button";
+
+// `fixed` (not `sticky`) so it stays visible regardless of scroll position;
+// anchored bottom-right to avoid tracking sidebar width; `bottom-20` clears
+// the mobile bottom nav.
+export function UnsavedChangesBar({
+  visible,
+  label,
+  pending = false,
+  onCancel,
+  onSave,
+}: {
+  visible: boolean;
+  label: string;
+  pending?: boolean;
+  onCancel: () => void;
+  onSave: () => void;
+}) {
+  return (
+    <div
+      className={`fixed bottom-20 right-6 z-30 flex items-center gap-4 border border-base-300 bg-base-100 px-5 py-3 ring-1 ring-foreground/10 transition-all duration-200 ease-out md:bottom-6 ${
+        visible
+          ? "translate-y-0 opacity-100"
+          : "pointer-events-none translate-y-2 opacity-0"
+      }`}
+    >
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        <Warning className="text-amber-500" size={15} weight="fill" />
+        <span>{label}</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <Button
+          disabled={pending}
+          onClick={onCancel}
+          size="sm"
+          type="button"
+          variant="outline"
+        >
+          Cancel
+        </Button>
+        <Button
+          className="gap-1.5"
+          disabled={pending}
+          onClick={onSave}
+          size="sm"
+          type="button"
+        >
+          {pending ? (
+            <>
+              <CircleNotch className="animate-spin" size={13} /> Saving…
+            </>
+          ) : (
+            "Save changes"
+          )}
+        </Button>
+      </div>
+    </div>
+  );
+}
