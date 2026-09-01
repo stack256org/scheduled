@@ -54,3 +54,9 @@ krova-db-*
 # local file uploads (local storage driver — files are stored here, not in
 # git). Docker mounts this as a persistent volume instead — see docker-compose.yml.
 /uploads
+
+# Brainer — derived index. rejected.json is your input, keep it.
+.brainer/index.db
+.brainer/index.db-*
+.brainer/models/
+.brainer/hooks/
