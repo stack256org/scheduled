@@ -52,9 +52,9 @@ Two database options — pick one before editing `.env`:
   local database container.
 
 Changed the code, or the published images aren't public yet? Use
-`docker-compose.build.yml` instead of `docker-compose.yml` — it builds both
-images from source locally. It needs a full `git clone` (not just the two
-files above), since it builds from the repo's `Dockerfile`/`Dockerfile.worker`.
+`docker-compose.build.yml` instead of `docker-compose.yml` — it builds the
+image from source locally. It needs a full `git clone` (not just the two
+files above), since it builds from the repo's `Dockerfile`.
 
 ### A1 — Bundled Postgres
 
@@ -287,6 +287,130 @@ Either way, once it's up: `APP_URL=https://schedule.example.com`
 in `.env`, and confirm `curl https://schedule.example.com/api/health` returns
 `{"status":"ok"}` through the proxy, not just on `localhost:3000` directly.
 
+## File storage and uploads (both paths)
+
+**Why this matters.** Users' avatars and the instance's branding logo are saved
+as files. With the default `local` storage driver they are written to an
+`uploads` directory on the machine running the web server; the database only
+stores a link like `/api/files/avatars/<id>.webp`. If that directory is not
+persistent — wiped when a container is replaced, or when you redeploy a fresh
+checkout — the files are gone and every avatar and the logo silently turn into
+broken images. Nothing errors and the database still looks fine, so set this up
+before you go live. Only the `web` process touches this directory; the worker
+and the migrate step don't.
+
+**Where the files live:**
+
+- **Docker:** `/app/uploads` inside the container.
+- **Manual / Node:** `uploads/` in the directory `pnpm start` runs from (for the
+  systemd unit above, `/opt/schduled/uploads`).
+
+### What is automatic and what you must do yourself
+
+| How you deploy | Persistent out of the box? | What you do |
+|---|---|---|
+| Docker Compose — `docker-compose.yml`, `docker-compose.external-db.yml`, or `docker-compose.build.yml` (including Dokploy's Docker Compose type) | **Yes, automatic.** The `web` service mounts the named volume `schduled_uploads` at `/app/uploads`, and a one-shot `init-uploads` service sets its ownership. | Nothing. Never run `docker compose down -v`, and [back it up](./backup.md). |
+| Dokploy **Application** (image / Dockerfile) | **No — one-time manual step.** Dokploy doesn't read the compose files in this mode. | Add a Volume named `schduled_uploads` mounted at `/app/uploads` — see [Dokploy: persistent uploads volume](./docker.md#dokploy-persistent-uploads-volume-one-time-setup). |
+| Any other single-container Docker setup — Coolify, CapRover, Portainer, plain `docker run`, Swarm, Kubernetes | **No — manual.** | Mount a named volume or a host directory at `/app/uploads` (examples below). |
+| Manual / Node (systemd, PM2, …) | **No — manual.** | Keep the `uploads` directory across deploys (see below). |
+| S3 or Cloudflare R2 storage | **No volume needed** — files live in your bucket. | Configure it fully and test it (see below). |
+
+### Other Docker setups: mount `/app/uploads`
+
+The mount path must be exactly `/app/uploads`. A **named volume** is the
+simplest option because Docker gives a new, empty volume the same ownership as
+the image's directory — the non-root `app` user (uid/gid `1001`):
+
+```bash
+docker run -d --name schduled \
+  --env-file .env \
+  -p 3000:3000 \
+  -v schduled_uploads:/app/uploads \
+  ghcr.io/stack256org/schduled:<tag>   # a version tag, or `main`
+```
+
+If you write your own Compose file, declare and pin the volume so redeploys
+always reattach to the same one (an unpinned name is prefixed with the project
+name, and a tool that changes the project name creates a new, empty volume):
+
+```yaml
+services:
+  web:
+    image: ghcr.io/stack256org/schduled:<tag>
+    volumes:
+      - uploads:/app/uploads
+
+volumes:
+  uploads:
+    name: schduled_uploads
+```
+
+A **bind mount** (a host directory) also works, but the directory must be
+writable by uid `1001` or every upload fails with `EACCES`:
+
+```bash
+sudo mkdir -p /srv/schduled/uploads
+sudo chown -R 1001:1001 /srv/schduled/uploads
+# then: -v /srv/schduled/uploads:/app/uploads
+```
+
+On Kubernetes, mount a PersistentVolumeClaim at `/app/uploads` and set the pod's
+`securityContext.fsGroup` to `1001`. Run a single `web` replica, or use storage
+that supports shared access, since the files live on that one volume.
+
+### Manual / Node: keep the `uploads` directory
+
+The `uploads/` directory is git-ignored and created on first upload, so a deploy
+that replaces the whole app directory deletes it. Avoid these:
+
+- deleting the directory and cloning again on each deploy;
+- release-directory deploys (a new directory per release behind a `current`
+  symlink) without sharing `uploads`;
+- `git clean -xfd` in the app directory.
+
+Either update in place (`git pull`, `pnpm install`, `pnpm build`), or keep the
+files outside the checkout and link them in:
+
+```bash
+sudo mkdir -p /var/lib/schduled/uploads
+sudo chown -R schduled:schduled /var/lib/schduled/uploads
+ln -s /var/lib/schduled/uploads /opt/schduled/uploads
+```
+
+The user running `pnpm start` (`schduled` in the unit above) must be able to
+write to it, and the `WorkingDirectory` of the web service decides where the
+app looks. Include the directory in your [backups](./backup.md).
+
+### S3 or R2 instead of a volume
+
+Setting `STORAGE_DRIVER=s3` (or `r2`) with its variables — see
+[`ENVIRONMENT.md` §7](../../ENVIRONMENT.md) — or choosing the driver under
+**Settings → Services** stores uploads in your bucket, so no volume is needed and
+the files survive any redeploy or server replacement. The bucket does not have to
+be public: files are always served through the app's `/api/files/...` route.
+
+Be careful with these three points:
+
+- **Incomplete settings fall back to local storage silently.** `s3` without a
+  bucket, or `r2` without a bucket or account ID, quietly uses local disk. In
+  Docker that is the container's non-persistent filesystem, and the boot warning
+  about a missing volume is not shown when the environment says `s3` or `r2`. Use
+  the **Test connection** button under **Settings → Services**, then upload an
+  avatar and confirm it lands in the bucket.
+- **Switching does not move existing files.** Files already on local disk stay
+  there and their links will 404 after the switch. Copy them into the bucket
+  under the same keys (for example `avatars/<id>.webp`) first.
+- **Settings → Services overrides the environment** and applies immediately, so
+  check there if uploads behave differently from your `.env`.
+
+### Check it worked
+
+- The web container's boot log does **not** contain
+  `[entrypoint] WARNING: /app/uploads is not a mounted volume`.
+- On Docker, `docker volume ls | grep uploads` lists your volume.
+- Upload an avatar, redeploy (or replace the container), and confirm it still
+  loads.
+
 ## First login — read this before you deploy
 
 **Email + password is the primary login method and is on by default**, so a
@@ -314,6 +438,8 @@ to admin. See `ENVIRONMENT.md` §3 for the full explanation.
 - [ ] `ALLOW_PUBLIC_SIGNUP=false` is set (or you've deliberately chosen open signup)
 - [ ] The worker is running — a test booking sends a confirmation
       (or logs one to the console if SMTP isn't configured)
+- [ ] Uploads are persistent — a mounted volume/directory, or S3/R2 —
+      see [File storage and uploads](#file-storage-and-uploads-both-paths)
 - [ ] Backups are scheduled — see [Backup](./backup.md)
 - [ ] If using Google/Zoom, redirect URIs match `APP_URL` exactly
       — see [Integrations](./integrations.md)

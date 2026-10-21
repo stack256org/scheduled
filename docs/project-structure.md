@@ -26,7 +26,7 @@ schduled/
 ├── docker-compose.yml              ← Bundled Postgres, pulls published images (default)
 ├── docker-compose.external-db.yml  ← Bring-your-own Postgres, pulls published images
 ├── docker-compose.build.yml        ← Bundled Postgres, builds images from source
-├── Dockerfile / Dockerfile.worker
+├── Dockerfile                      ← One image: web, worker and migrate (see scripts/docker-entrypoint.sh)
 ├── drizzle.config.ts
 ├── biome.jsonc
 └── package.json

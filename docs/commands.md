@@ -26,8 +26,8 @@ pnpm db:push
 pnpm db:reset
 ```
 
-Build the worker image:
+Build the Docker image (web, worker and migrate are one image):
 
 ```bash
-docker build -f Dockerfile.worker -t schduled-worker .
+docker build -t schduled .
 ```

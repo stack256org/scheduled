@@ -5,12 +5,12 @@ name: Release
 # It looks at the "version" field in package.json. If no git tag exists for it
 # yet, this push is a release, and the workflow does all of it:
 #
-#   1. builds the web and worker images for Intel and ARM
+#   1. builds the image for Intel and ARM
 #   2. publishes both to GitHub Packages, tagged with the version ladder + latest
 #   3. creates the v<version> git tag
 #   4. creates the GitHub Release, with notes taken from CHANGELOG.md
 #
-# If the version already has a tag, it is an ordinary push: both images are
+# If the version already has a tag, it is an ordinary push: the image is
 # still rebuilt and published as `main` and `sha-<short>`, and nothing is
 # released. So cutting a release is: bump "version" in package.json, add the
 # matching section to CHANGELOG.md, commit, push. Nothing to tag by hand.
@@ -32,11 +32,11 @@ name: Release
 # the sha- image tag, and the release target below use workflow_run.head_sha
 # instead, so a release always lands on the commit that passed.
 #
-# TWO IMAGES: unlike a single-process app, Schduled ships a web server
-# (Dockerfile) and a background worker (Dockerfile.worker) as separate
-# images, since they scale and restart independently
-# (docker-compose.yml/.build.yml run them as distinct services). Both are
-# built and published in the same matrix job below.
+# ONE IMAGE: the web server, the background worker and the one-shot migration
+# job are all the same image (Dockerfile); compose picks the role with
+# `command:`, and with no command scripts/docker-entrypoint.sh runs them
+# together. There used to be a separate schduled-worker image — it is no longer
+# built, so existing tags remain pullable but receive no new releases.
 #
 # ONE-TIME STEP after the first successful run: a new GitHub Packages entry
 # is private, even in a public repository. Repository -> Packages -> pick the
@@ -123,7 +123,7 @@ jobs:
           fi
           echo "Found the changelog section for $version."
 
-  # ── Build and publish both images ─────────────────────────────────────────
+  # ── Build and publish the image ───────────────────────────────────────────
   image:
     name: Build and push ${{ matrix.name }} (amd64 + arm64)
     needs: check
@@ -136,16 +136,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: web
+          - name: schduled
             dockerfile: Dockerfile
             image_name: schduled
             title: Schduled
-            description: Self-hosted scheduling platform — web server.
-          - name: worker
-            dockerfile: Dockerfile.worker
-            image_name: schduled-worker
-            title: Schduled Worker
-            description: Self-hosted scheduling platform — background job worker (pg-boss).
+            description: Self-hosted scheduling platform.
     steps:
       - uses: actions/checkout@v4
         with:
@@ -222,9 +217,7 @@ jobs:
           cache-to: type=registry,ref=${{ steps.ctx.outputs.image }}:buildcache,mode=max
           provenance: true
           sbom: true
-          # GIT_SHA is only declared as an ARG in the web Dockerfile (surfaced
-          # at /api/version); passing it to the worker build is a harmless
-          # no-op since Dockerfile.worker has no matching ARG.
+          # Surfaced at /api/version.
           build-args: |
             GIT_SHA=${{ steps.ctx.outputs.short_sha }}
 
@@ -235,7 +228,7 @@ jobs:
   # daemon asks, because that is the only vantage point from which a private
   # package looks different from a public one.
   #
-  # It deliberately does NOT gate `release` below. The images are already
+  # It deliberately does NOT gate `release` below. The image is already
   # pushed by the time this runs, so blocking the tag would leave a published
   # release with no image pointing at it. A red run is the signal; the fix is
   # one click in Package settings and is never needed again for that package.
@@ -246,7 +239,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image_name: [schduled, schduled-worker]
+        image_name: [schduled]
     steps:
       - name: Resolve it signed out, the way a customer does
         env:
@@ -323,7 +316,6 @@ jobs:
             echo
             echo '```bash'
             echo "docker pull ghcr.io/${owner}/schduled:$version"
-            echo "docker pull ghcr.io/${owner}/schduled-worker:$version"
             echo '```'
           } >> notes.md
 
@@ -354,9 +346,9 @@ jobs:
             echo
             echo "- Tag \`v$version\` created"
             echo "- Release published"
-            echo "- Images: \`ghcr.io/${owner}/schduled:$version\` and \`ghcr.io/${owner}/schduled-worker:$version\` (also \`latest\`)"
+            echo "- Image: \`ghcr.io/${owner}/schduled:$version\` (also \`latest\`)"
             echo
             echo "> [!NOTE]"
-            echo "> If this is the first release, both packages are still **private**."
+            echo "> If this is the first release, the package is still **private**."
             echo "> Repository → Packages → pick each package → Package settings → Change visibility."
           } >> "$GITHUB_STEP_SUMMARY"

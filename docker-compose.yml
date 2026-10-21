@@ -33,8 +33,9 @@
 # schduled_uploads. They are pinned to literal names and survive `down`,
 # `pull`, and `up -d`. Only `down -v` destroys them.
 
-x-web-image: &web_image ${SCHDULED_WEB_IMAGE:-ghcr.io/stack256org/schduled}:${IMAGE_TAG:-latest}
-x-worker-image: &worker_image ${SCHDULED_WORKER_IMAGE:-ghcr.io/stack256org/schduled-worker}:${IMAGE_TAG:-latest}
+# One image fills all three roles below (migrate, web, worker) — the only
+# difference is `command:`. Overridable with SCHDULED_IMAGE.
+x-image: &image ${SCHDULED_IMAGE:-ghcr.io/stack256org/schduled}:${IMAGE_TAG:-latest}
 
 services:
   postgres:
@@ -73,7 +74,7 @@ services:
     restart: "no"
 
   migrate:
-    image: *worker_image
+    image: *image
     pull_policy: always
     # Not `pnpm db:migrate` (drizzle-kit's CLI) — it was observed to exit 1
     # on failure without printing the underlying error. `db:migrate:docker`
@@ -90,8 +91,9 @@ services:
     restart: "no"
 
   web:
-    image: *web_image
+    image: *image
     pull_policy: always
+    command: ["pnpm", "start"]
     restart: unless-stopped
     env_file: .env
     # HOST_PORT, not PORT: `env_file: .env` passes every var into the
@@ -122,10 +124,26 @@ services:
       retries: 3
 
   worker:
-    image: *worker_image
+    image: *image
     pull_policy: always
+    command: ["pnpm", "worker:start"]
     restart: unless-stopped
     env_file: .env
+    environment:
+      # Serves no traffic, so a smaller heap than the image's 768 MB default.
+      NODE_OPTIONS: --max-old-space-size=384
+      # Only read by scripts/healthcheck.mjs below, never by the worker itself.
+      SCHDULED_ROLE: worker
+    # The image's default healthcheck probes :3000, which the worker does not
+    # serve. Check the heartbeat file scripts/worker.ts rewrites every 15s
+    # instead — it catches a wedged event loop that "is the process alive"
+    # would miss.
+    healthcheck:
+      test: ["CMD", "node", "scripts/healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
     depends_on:
       postgres:
         condition: service_healthy

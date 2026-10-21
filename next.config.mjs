@@ -5,10 +5,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // Produces a self-contained .next/standalone build (bundled node_modules,
-  // minimal server) — dramatically smaller Docker images than a full
-  // `next start` deploy.
-  output: "standalone",
+  // No `output: "standalone"` on purpose: the single Docker image runs
+  // `next start` from a full install, and also needs tsx, db/migrations and the
+  // worker source on disk (see Dockerfile).
   // Declares sharp (native image resize, used by the avatar upload route) as
   // a genuine runtime dependency rather than something to bundle. Turbopack
   // already auto-detects and externalizes sharp on its own (this line alone

@@ -9,6 +9,58 @@ and this project follows [Semantic Versioning](https://semver.org/). Every
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-21
+
+### Changed
+
+- **One image instead of two.** The web server, the worker and the migration job now
+  run from the single `ghcr.io/stack256org/schduled` image; `Dockerfile.worker` and the
+  `schduled-worker` image are gone. The image ships the full source and a production
+  `node_modules` instead of Next's `standalone` bundle (the worker needs `tsx`, and
+  migrations need `db/migrations`, on disk). The compose files run the same image three
+  times with a different `command:`. New releases are no longer published as
+  `schduled-worker`; existing tags stay pullable.
+- `scripts/migrate.ts` takes a `pg_advisory_lock`, so two overlapping deploys queue instead
+  of racing to apply the same migration.
+- **Dependencies updated** to current stable releases, including Next.js 16.4, React 19.3,
+  TypeScript 7, `googleapis` 186, `motion` 14, `files-sdk` 3 and `nodemailer` 10. `better-auth`
+  stays on the 1.6 line (1.7 needs an account-schema migration). Package manager is now
+  pnpm 12.14.0; the `Dockerfile` installs corepack 0.36 so it can activate it.
+
+### Fixed
+
+- Dev console error "Encountered a script tag while rendering React component" from the
+  theme provider.
+
+### Documentation
+
+- New "File storage and uploads" section in `docs/self-hosting/installation.md`: which
+  deployments keep uploads automatically (Compose) and which need a volume or S3/R2 set up by
+  hand (Dokploy Application, other Docker platforms, manual installs).
+
+### Added
+
+- **Single-container deploys now migrate and run the worker.** With no command, the image
+  applies pending migrations, then runs the web server and one worker
+  (`scripts/docker-entrypoint.sh`). Previously a platform that runs the image once (Dokploy,
+  Coolify, `docker run`) started only the web server, so a release that added a column failed
+  with a Server Components render error and no email or reminder ever ran. Pick a role with
+  `SCHDULED_ROLE` (`all`/`app`/`worker`/`migrate`); skip migrations with
+  `SCHDULED_RUN_MIGRATIONS=false`. Compose users are unaffected: an explicit `command:` passes
+  straight through.
+- `scripts/healthcheck.mjs`: a role-aware container healthcheck (web, worker heartbeat, or
+  both).
+
+### Upgrade notes
+
+- **Compose users:** replace your compose file with the new one (or edit it): `migrate` and
+  `worker` now use the `schduled` image, not `schduled-worker`, and `web` needs
+  `command: ["pnpm", "start"]`. `SCHDULED_WEB_IMAGE` / `SCHDULED_WORKER_IMAGE` are replaced by
+  a single `SCHDULED_IMAGE`.
+- **Platform deployments:** if you set the command to `pnpm start` to work around the missing
+  worker, clear it, or the entrypoint (and its auto-migrate) stays bypassed. Mount a volume at
+  `/app/uploads` or use S3/R2.
+
 ## [0.1.0] - 2026-08-24
 
 Initial self-hosted release.

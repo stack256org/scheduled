@@ -592,8 +592,10 @@ All are tracked with fixes in `SELF-HOSTING.md` Part 4.
   — **fixed.** `DB_POOL_MAX` env var (§1) controls pool size; a bounded
   connect-retry now runs once at server boot via `instrumentation.ts`, smoothing
   over Docker Compose startup ordering.
-- **Docker packaging is build-verified, not deploy-verified.** The `Dockerfile`,
-  `Dockerfile.worker`, and both compose files were written and every piece they
+- **Docker packaging is build-verified, not deploy-verified.** *(Historical
+  note: `Dockerfile.worker` and the `standalone` output described here were
+  since replaced by a single image — see `Dockerfile` and `CHANGELOG.md`.)* The
+  `Dockerfile`, `Dockerfile.worker`, and both compose files were written and every piece they
   depend on was individually confirmed (standalone build output exists at the
   right paths, both compose files parse as valid YAML, `drizzle-kit` is a
   production dependency so the dedicated `migrate` service can find it,

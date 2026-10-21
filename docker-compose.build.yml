@@ -17,6 +17,15 @@
 # image. If you need both "build from source" and "external database" at
 # once, copy this file and drop the postgres/init-uploads services from it.
 
+# One image fills all three roles below (migrate, web, worker) — the only
+# difference is `command:`. Each service declares the same build and tag, so the
+# build runs once and the layer cache serves the other two.
+x-build: &build
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: schduled:local
+
 services:
   postgres:
     image: postgres:16
@@ -51,9 +60,7 @@ services:
     restart: "no"
 
   migrate:
-    build:
-      context: .
-      dockerfile: Dockerfile.worker
+    <<: *build
     # Not `pnpm db:migrate` (drizzle-kit's CLI) — it was observed to exit 1
     # on failure without printing the underlying error. `db:migrate:docker`
     # (scripts/migrate.ts) uses the same postgres/drizzle-orm migrator
@@ -69,9 +76,8 @@ services:
     restart: "no"
 
   web:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    <<: *build
+    command: ["pnpm", "start"]
     restart: unless-stopped
     env_file: .env
     # HOST_PORT, not PORT: `env_file: .env` passes every var into the
@@ -100,11 +106,25 @@ services:
       retries: 3
 
   worker:
-    build:
-      context: .
-      dockerfile: Dockerfile.worker
+    <<: *build
+    command: ["pnpm", "worker:start"]
     restart: unless-stopped
     env_file: .env
+    environment:
+      # Serves no traffic, so a smaller heap than the image's 768 MB default.
+      NODE_OPTIONS: --max-old-space-size=384
+      # Only read by scripts/healthcheck.mjs below, never by the worker itself.
+      SCHDULED_ROLE: worker
+    # The image's default healthcheck probes :3000, which the worker does not
+    # serve. Check the heartbeat file scripts/worker.ts rewrites every 15s
+    # instead — it catches a wedged event loop that "is the process alive"
+    # would miss.
+    healthcheck:
+      test: ["CMD", "node", "scripts/healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
     depends_on:
       postgres:
         condition: service_healthy

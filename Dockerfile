@@ -1,35 +1,71 @@
-FROM node:22-bookworm-slim AS deps
+# syntax=docker/dockerfile:1
 
-WORKDIR /app
+# ── Schduled — one image, three roles ─────────────────────────────────────────
+# The same image runs the web app, the background worker, and the one-shot
+# migration job; compose picks the role with `command:`
+#
+#   pnpm start               → the Next.js server
+#   pnpm worker:start        → the pg-boss worker
+#   pnpm db:migrate:docker   → apply migrations, then exit
+#
+# With NO command, scripts/docker-entrypoint.sh picks the role from
+# SCHDULED_ROLE instead, defaulting to "all": migrate, then web server AND
+# worker supervised in the one container. That is for platforms that deploy a
+# registry image once and have no `command:` to set (Dokploy, Coolify, CapRover,
+# a bare `docker run`) — without it such a deployment gets the web server alone:
+# no migrations and no worker, so no email, reminder or calendar sync ever runs.
+#
+# That is why this image ships the real source tree and a real node_modules
+# instead of Next's `output: "standalone"` bundle (and why there is no longer a
+# separate worker image). The worker runs TypeScript through tsx,
+# scripts/migrate.ts reads db/migrations off disk at runtime, and the admin
+# recovery script (scripts/make-admin.ts) has to be callable inside a running
+# container. A standalone build contains none of that, and needed a second image
+# plus a hand-maintained copy of sharp's native libvips to work around its
+# file-tracer. One image, no tracer.
+#
+# Runtime node_modules is a --prod install, so devDependencies stay out. tsx,
+# drizzle-orm, drizzle-kit and next are all production dependencies.
+
+FROM node:22-bookworm-slim AS base
 
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+# Corepack's default cache ($HOME/.cache/node/corepack) is per-user, and the
+# non-root `app` user below has no home directory, so a `pnpm` call as `app`
+# would try to download pnpm into a path it can't create (EACCES). Pinning
+# COREPACK_HOME to a shared path and running `corepack prepare --activate` here,
+# as root with network access, bakes the exact pnpm version from package.json's
+# `packageManager` field into the image — `pnpm` never touches the network again.
+ENV COREPACK_HOME=/opt/corepack
+WORKDIR /app
+COPY package.json ./
+# The corepack bundled with node:22 images predates pnpm 12's binary layout and
+# cannot launch it, so install a corepack that can before activating pnpm.
+RUN npm install -g corepack@0.36.0 \
+  && corepack enable \
+  && corepack prepare --activate \
+  && chmod -R a+rX "$COREPACK_HOME"
 
-RUN corepack enable
 
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-# Full install (not --prod) — the build needs devDependencies (typescript,
-# tailwind, biome types, etc.)
+# ── Full dependency tree (devDependencies included) — build only ──────────────
+FROM base AS deps
+
+# pnpm-workspace.yaml is required here, not optional: pnpm 11 reads its
+# `allowBuilds` allowlist from that file. Without it in the build context no
+# package may run a postinstall script — including sharp, which needs one to
+# place its libvips binary.
+COPY pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
-# Next's standalone output-file-tracing only reliably captures files reached
-# via a static require()/import — sharp's native binding dlopen's its
-# libvips .so at runtime instead, which the tracer can't see, so it's
-# silently missing from `.next/standalone`'s pruned node_modules (observed in
-# production: "ERR_DLOPEN_FAILED: libvips-cpp.so... cannot open shared
-# object file"). This stage dereferences sharp's real files out of pnpm's
-# symlinked virtual store (`node_modules/sharp` -> `.pnpm/sharp@x.y.z/...`)
-# so they can be copied into the runner as plain files below.
-FROM node:22-bookworm-slim AS sharp-deps
 
-WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
-RUN real_dir="$(dirname "$(readlink -f node_modules/sharp)")" \
-  && mkdir -p /sharp-runtime \
-  && cp -rL "$real_dir/." /sharp-runtime/
+# ── Production-only dependency tree — shipped to the runner ───────────────────
+FROM base AS prod-deps
 
-FROM node:22-bookworm-slim AS builder
+COPY pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile --prod
 
-WORKDIR /app
+
+FROM base AS build
 
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_OPTIONS="--max-old-space-size=6144"
@@ -63,66 +99,76 @@ ENV NEXT_PUBLIC_APP_URL="http://localhost:3000"
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-RUN corepack enable && pnpm build
+RUN pnpm build
 
-FROM node:22-bookworm-slim AS runner
 
-WORKDIR /app
+FROM base AS runner
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+# Caps V8's heap so an OOM shows up as a clean, restartable crash instead of
+# the container being silently killed by the host's OOM killer. In the default
+# "all" role the web server and the worker each get this cap. Raise it if your
+# container's memory limit is higher than the default assumption below; the
+# compose worker service lowers it to 384 since it serves no traffic.
+ENV NODE_OPTIONS=--max-old-space-size=768
 
 # Optional: docker build --build-arg GIT_SHA=$(git rev-parse --short HEAD)
 # Surfaced at /api/version. Falls back to "unknown" if not passed.
 ARG GIT_SHA=unknown
 ENV GIT_SHA=$GIT_SHA
 
-ENV NODE_ENV=production
-ENV NEXT_TELEMETRY_DISABLED=1
-ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
-# Caps V8's heap so an OOM shows up as a clean, restartable crash instead of
-# the container being silently killed by the host's OOM killer. Raise this if
-# your container's memory limit is higher than the default assumption below.
-ENV NODE_OPTIONS=--max-old-space-size=768
-
+# uid/gid 1001 is deliberate and must not change: the `uploads` volume is
+# chowned to it (see `init-uploads` in docker-compose.yml), so a redeploy keeps
+# write access.
 RUN groupadd --system --gid 1001 app \
   && useradd --system --uid 1001 --gid app app
 
-# Next.js standalone output: a minimal, self-traced server with its own
-# node_modules (only what's actually used at runtime) — no separate install
-# needed. Migrations run in a dedicated `migrate` service before this
-# container starts (see docker-compose.yml, Dockerfile.worker), so this image
-# no longer needs drizzle-kit, drizzle.config.ts, or db/migrations.
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
-COPY --from=builder /app/public ./public
+# --chown on the COPYs rather than a trailing `chown -R`: it avoids duplicating
+# the whole tree in an extra layer, and the runtime user genuinely needs write
+# access to .next (the image-optimization cache lives at .next/cache).
+COPY --chown=app:app . .
+COPY --from=prod-deps --chown=app:app /app/node_modules ./node_modules
+COPY --from=build --chown=app:app /app/.next ./.next
 
-# The standalone trace leaves node_modules/sharp (and its native deps) as
-# symlinks into a pruned .pnpm store missing sharp's libvips .so — COPY can't
-# merge a real directory tree onto an existing symlink/file at the same
-# path ("cannot copy to non-directory"), so clear those exact entries first,
-# then overlay the fully-dereferenced real files from the sharp-deps stage
-# above (see the comment there for why the trace alone isn't reliable here).
-RUN rm -rf node_modules/sharp node_modules/@img node_modules/detect-libc node_modules/semver
-COPY --from=sharp-deps /sharp-runtime/. ./node_modules/
+# The repo tracks shell scripts as mode 644 (no exec bit to inherit), so set it
+# here rather than relying on the checkout.
+RUN chmod +x /app/scripts/docker-entrypoint.sh
 
 # Pre-create the uploads mount point (STORAGE_DRIVER=local, see
 # docker-compose.yml's `uploads` volume) owned by `app` before it exists.
 # Without this, /app/uploads doesn't exist in the image, so on first mount
 # Docker creates it as root:root — the non-root `app` user below then gets
-# EACCES on every upload, since chown -R below only ever touches what's
-# already in this layer, not a volume created fresh at container start.
-RUN mkdir -p uploads && chown -R app:app /app
+# EACCES on every upload.
+RUN mkdir -p /app/uploads && chown -R app:app /app/uploads
 
 USER app
-
 EXPOSE 3000
-ENV PORT=3000
-ENV HOSTNAME=0.0.0.0
 
-CMD ["node", "server.js"]
+# Role-aware (scripts/healthcheck.mjs): the web server's /api/health (a real
+# query against Postgres), the worker's heartbeat file, or both in the default
+# "all" role. docker-compose.yml overrides this per service.
+#
+# start-period covers the slowest legitimate boot: in the "all" role the web
+# server starts only AFTER migrations have been applied, and the migration step
+# waits for the database with backoff.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
+  CMD ["node", "scripts/healthcheck.mjs"]
+
+# Every explicit command (the `command:` of each docker-compose service, or
+# `docker run <image> bash`) is exec'd verbatim by the entrypoint. "schduled" is
+# a sentinel meaning "no command given — read SCHDULED_ROLE, default all". It
+# must be a real value, not an empty CMD, or the base image's inherited
+# `CMD ["node"]` would take its place.
+ENTRYPOINT ["/app/scripts/docker-entrypoint.sh"]
+CMD ["schduled"]
 
 # OCI metadata. This is what renders on the GitHub Packages page, and what links
 # the package back to this repository.
 LABEL org.opencontainers.image.title="Schduled" \
-      org.opencontainers.image.description="Self-hosted scheduling platform — web server." \
+      org.opencontainers.image.description="Self-hosted scheduling platform." \
       org.opencontainers.image.url="https://github.com/stack256org/scheduled" \
       org.opencontainers.image.source="https://github.com/stack256org/scheduled" \
       org.opencontainers.image.documentation="https://github.com/stack256org/scheduled#readme" \

@@ -8,7 +8,8 @@ if (existsSync(".env")) {
 
 // Docker's HEALTHCHECK has no visibility into the worker beyond "is the
 // process alive" — this heartbeat file gives it a real liveness signal
-// (checked in Dockerfile.worker, which expects /tmp/worker-heartbeat).
+// (checked by scripts/healthcheck.mjs and the compose worker service,
+// which expect /tmp/worker-heartbeat).
 // tmpdir() resolves to that same path in the Linux container while still
 // working for local dev on Windows. A wedged event loop stops updating it.
 const HEARTBEAT_FILE = join(tmpdir(), "worker-heartbeat");

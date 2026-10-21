@@ -48,18 +48,17 @@ See **[SELF-HOSTING.md](./SELF-HOSTING.md)** for the full guide, and
 curl -O https://raw.githubusercontent.com/stack256org/scheduled/main/docker-compose.yml
 curl -o .env https://raw.githubusercontent.com/stack256org/scheduled/main/.env.docker.example
 # set APP_SECRET, APP_URL, and (recommended) INITIAL_ADMIN_EMAIL
-IMAGE_TAG=0.1.0 docker compose up -d
+IMAGE_TAG=0.2.0 docker compose up -d
 ```
 
-This pulls prebuilt, published images (multi-arch: Intel + ARM) rather than
+This pulls a prebuilt, published image (multi-arch: Intel + ARM) rather than
 building on your server. Pin a version in production, because `latest`
 moves with every release — available tags are `latest`, the `0` /
-`0.1` / `0.1.0` ladder, `main` (rebuilt on every change, expect
+`0.2` / `0.2.0` ladder, `main` (rebuilt on every change, expect
 rough edges), and a fixed `sha-<short>` per build:
 
 ```bash
-docker pull ghcr.io/stack256org/schduled:0.1.0
-docker pull ghcr.io/stack256org/schduled-worker:0.1.0
+docker pull ghcr.io/stack256org/schduled:0.2.0
 ```
 <!-- END GENERATED: quick-start -->
 
@@ -114,18 +113,22 @@ the console instead of sending them.
 
 ## Running it with Docker
 
-Two images are built from this repo and published to GitHub Container
-Registry — see [CI & releases](#ci--releases) for how they get there:
+One image is built from this repo and published to GitHub Container
+Registry as `ghcr.io/stack256org/schduled` — see
+[CI & releases](#ci--releases) for how it gets there. It fills three roles,
+picked by the command the container is started with:
 
-| Image | Dockerfile | Published as | Purpose |
-|---|---|---|---|
-| `web` | `Dockerfile` | `ghcr.io/stack256org/schduled` | The Next.js server (`output: 'standalone'`) — serves traffic once the database is migrated |
-| `worker` | `Dockerfile.worker` | `ghcr.io/stack256org/schduled-worker` | The background job processor (pg-boss) — emails, reminders, calendar sync. **Nothing sends without it.** |
+| Role | Command | Purpose |
+|---|---|---|
+| web | `pnpm start` | The Next.js server — serves traffic once the database is migrated |
+| worker | `pnpm worker:start` | The background job processor (pg-boss) — emails, reminders, calendar sync. **Nothing sends without it.** |
+| migrate | `pnpm db:migrate:docker` | Applies pending database migrations, then exits |
 
-Both run as a non-root `app` user and connect to the same Postgres database —
-that's the only thing they share. Migrations run in a dedicated one-shot
-`migrate` service (the worker image, command overridden) before `web`/`worker`
-start, so neither image runs migrations itself.
+The compose files run each role as its own service from the same image, in
+the order `migrate` → `web` / `worker`. The image runs as a non-root `app`
+user. With **no command** (a platform that deploys the image once) it migrates
+and then runs the web server and one worker together — see
+[Deploying somewhere else](#deploying-somewhere-else).
 
 Three compose files. Pick **one** — they're alternatives, never used together:
 
@@ -133,7 +136,7 @@ Three compose files. Pick **one** — they're alternatives, never used together:
 |---|---|---|---|
 | `docker-compose.yml` | **pulled** | yes | **Recommended default.** No local build, works on a small VPS. |
 | `docker-compose.external-db.yml` | pulled | no | You already have a Postgres (managed service or your own). |
-| `docker-compose.build.yml` | **built locally** from `Dockerfile` / `Dockerfile.worker` | yes | You changed the code, or no published image is available yet. |
+| `docker-compose.build.yml` | **built locally** from `Dockerfile` | yes | You changed the code, or no published image is available yet. |
 
 ```bash
 # Recommended default
@@ -170,12 +173,16 @@ clone directory), so a deploy tool that doesn't keep the compose project name
 stable can't silently create a new, empty volume and orphan your data. They
 survive `down`, `pull`, `build`, and `up -d` — only `down -v` destroys them.
 
+On Compose this is automatic. Dokploy Applications, other Docker platforms and
+non-Docker installs need a persistent `/app/uploads` (or `uploads/`) set up by
+hand, or S3/R2 — see
+[File storage and uploads](./docs/self-hosting/installation.md#file-storage-and-uploads-both-paths).
+
 ### Healthchecks
 
 - `web` hits its own `GET /api/health`, which runs a real query against
   Postgres, not just "is the process alive." See [Health checks](#health-checks).
-- `worker` has a `HEALTHCHECK` in `Dockerfile.worker` that checks a heartbeat
-  file the worker writes every 15 seconds — this catches a wedged event loop
+- `worker` checks a heartbeat file the worker writes every 15 seconds — this catches a wedged event loop
   a plain "is the process running" check would miss.
 - `postgres` (bundled compose files only) uses `pg_isready`, so `web`/`worker`
   don't start against a not-yet-ready database.
@@ -208,18 +215,44 @@ Full reference — resource sizing, building images without Compose, the
 
 ### Anything that runs a container
 
-Coolify, Dokploy, CapRover, Portainer, Kubernetes, Docker Swarm, ECS. Point
-them at `ghcr.io/stack256org/schduled` (web) and
-`ghcr.io/stack256org/schduled-worker` (worker), and run three services:
+Coolify, Dokploy, CapRover, Portainer, Kubernetes, Docker Swarm, ECS.
 
-| Service | Image | Command | Notes |
-|---|---|---|---|
-| web | `schduled` | `pnpm start` | Serves on port 3000. Probe `GET /api/health`. |
-| worker | `schduled-worker` | `pnpm worker:start` | No web port. **Email and background jobs don't run without it.** |
-| migrate | `schduled-worker` | `pnpm db:migrate:docker` | Run once, to completion, before the other two on each deploy. |
+**One container (Dokploy, Coolify, `docker run`).** Point the platform at
+`ghcr.io/stack256org/schduled`, set the environment variables, and **leave the
+command blank**. With no command the image's entrypoint applies pending
+migrations, then runs the web server **and exactly one worker** in that
+container, so selecting a new version migrates itself. Probe
+`GET /api/health` on port 3000.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SCHDULED_ROLE` | `all` | `all` = migrate + web + worker. Or `app`, `worker`, `migrate` to run a single role. |
+| `SCHDULED_RUN_MIGRATIONS` | `true` for `all`/`migrate`, else `false` | Set `false` if your managed database user may not run DDL. |
+
+Setting an explicit command such as `pnpm start` **overrides the entrypoint**:
+no migrations and no worker. Run exactly one container in role `all` — two
+workers can double-process jobs.
+
+**Dokploy (Application/Dockerfile):** add a persistent **Volume** named
+`schduled_uploads` mounted at `/app/uploads` once by hand, or uploaded avatars
+and logos are lost on redeploy. Steps in
+[docs/self-hosting/docker.md](./docs/self-hosting/docker.md#dokploy-persistent-uploads-volume-one-time-setup).
+
+**Separate services (Kubernetes, Swarm, ECS).** Run the same image three times:
+
+| Service | Command | Notes |
+|---|---|---|
+| migrate | `pnpm db:migrate:docker` | Run once, to completion, before the other two on each deploy. |
+| web | `pnpm start` | Serves on port 3000. Probe `GET /api/health`. |
+| worker | `pnpm worker:start` | No web port. **Email and background jobs don't run without it.** |
 
 On the default `local` storage setting, mount a permanent volume at
-`/app/uploads` on the `web` service. S3 and R2 need none.
+`/app/uploads` on the container serving `web` (in role `all`, that is the
+only container). Without it, uploads vanish on the next redeploy — the
+container logs a warning at boot when the mount is missing. S3 and R2 need none.
+Every deployment method — what is automatic and what you set up yourself,
+including manual installs — is in
+[File storage and uploads](./docs/self-hosting/installation.md#file-storage-and-uploads-both-paths).
 
 ### A plain server (no Docker)
 
@@ -292,7 +325,7 @@ error goes to the server log, never into the response.
 
 ```bash
 curl http://localhost:3000/api/version
-# {"name":"schduled","version":"0.1.0","gitSha":"a1b2c3d"}
+# {"name":"schduled","version":"0.2.0","gitSha":"a1b2c3d"}
 ```
 
 `gitSha` is `"unknown"` unless the image was built with
@@ -354,9 +387,9 @@ push to `main` and every pull request:
 after CI succeeds on `main` (never at the same time as CI, so a build can't
 publish from a commit whose tests are still running or already failed):
 
-1. Builds `web` and `worker` — two separate images, since they scale and
-   restart independently — for `linux/amd64` **and** `linux/arm64`.
-2. Publishes both to `ghcr.io/stack256org/schduled{,-worker}`, tagged
+1. Builds the image — one image for web, worker and migrate — for
+   `linux/amd64` **and** `linux/arm64`.
+2. Publishes it to `ghcr.io/stack256org/schduled`, tagged
    `main` and `sha-<short>` on every push.
 3. If `package.json`'s `version` has no matching `v<version>` git tag yet,
    the push is treated as a **release**: it additionally publishes the

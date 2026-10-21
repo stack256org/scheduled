@@ -22,6 +22,13 @@ if (!databaseUrl) {
 
 const MAX_ATTEMPTS = 10;
 
+// Arbitrary but stable application-level key. Any other process running these
+// migrations against the same database blocks here rather than racing us —
+// Drizzle's migrator has no locking of its own. It matters now that the image
+// migrates on boot by default: two overlapping deploys (old and new container
+// during a redeploy) would otherwise both try to apply the same migration.
+const MIGRATION_LOCK_ID = 4_314_113;
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -50,9 +57,16 @@ async function main() {
 
   try {
     await waitForDatabase(client);
-    console.log("[migrate] applying migrations from ./db/migrations …");
-    await migrate(drizzle(client), { migrationsFolder: "./db/migrations" });
-    console.log("[migrate] done.");
+
+    // Session-scoped lock, so it must stay on this one connection (max: 1).
+    await client`select pg_advisory_lock(${MIGRATION_LOCK_ID})`;
+    try {
+      console.log("[migrate] applying migrations from ./db/migrations …");
+      await migrate(drizzle(client), { migrationsFolder: "./db/migrations" });
+      console.log("[migrate] done.");
+    } finally {
+      await client`select pg_advisory_unlock(${MIGRATION_LOCK_ID})`;
+    }
   } finally {
     await client.end();
   }

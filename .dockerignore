@@ -1,9 +1,10 @@
 node_modules
 .next
 .git
-.env
-.env.local
-.env*.local
+.env*
+!.env*.example
+uploads
+.claude
 *.pem
 .DS_Store
 npm-debug.log*

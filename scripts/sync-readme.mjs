@@ -14,12 +14,11 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const readmePath = join(root, "README.md");
 
-// Matches release.yml's checkout URLs and its `image_name: schduled` /
-// `schduled-worker` matrix entries. Registries reject capitals, so this is
-// lowercase throughout, same as release.yml lowercasing the repo owner.
+// Matches release.yml's checkout URLs and its `image_name: schduled` matrix
+// entry. Registries reject capitals, so this is lowercase throughout, same as
+// release.yml lowercasing the repo owner.
 const OWNER_REPO = "stack256org/scheduled";
 const WEB_IMAGE = "ghcr.io/stack256org/schduled";
-const WORKER_IMAGE = "ghcr.io/stack256org/schduled-worker";
 
 const { version } = JSON.parse(
   readFileSync(join(root, "package.json"), "utf8")
@@ -53,7 +52,7 @@ curl -o .env https://raw.githubusercontent.com/${OWNER_REPO}/main/.env.docker.ex
 IMAGE_TAG=${version} docker compose up -d
 \`\`\`
 
-This pulls prebuilt, published images (multi-arch: Intel + ARM) rather than
+This pulls a prebuilt, published image (multi-arch: Intel + ARM) rather than
 building on your server. Pin a version in production, because \`latest\`
 moves with every release — available tags are \`latest\`, the \`${major}\` /
 \`${minor}\` / \`${version}\` ladder, \`main\` (rebuilt on every change, expect
@@ -61,7 +60,6 @@ rough edges), and a fixed \`sha-<short>\` per build:
 
 \`\`\`bash
 docker pull ${WEB_IMAGE}:${version}
-docker pull ${WORKER_IMAGE}:${version}
 \`\`\``
   : `\`\`\`bash
 curl -O https://raw.githubusercontent.com/${OWNER_REPO}/main/docker-compose.yml
